@@ -6,19 +6,25 @@ import platform
 import subprocess
 from typing import Literal, Optional, List
 from pathlib import Path
-from shutil import which
 
 # Third party
 from rich.console import Console
 
 # Local
 from outexplain.utils import (
+    Command,
+    MAX_COMMANDS_DEFAULT,
+    MAX_HISTORY_LINES,
+    Shell,
+    build_context_from_commands,
+    choose_symbols,
+    detect_terminal_info,
+    explain,
+    format_terminal_info,
+    get_commands,
     get_shell,
     get_terminal_context,
-    explain,
-    detect_terminal_info,
-    format_terminal_info,
-    choose_symbols,
+    truncate_commands,
 )
 
 
@@ -35,17 +41,7 @@ def _color_system_from_depth(depth: int) -> Literal["auto", "standard", "256", "
     return "standard"
 
 
-# ---------------------------
-# PowerShell helpers
-# ---------------------------
-def _pwsh_available() -> Optional[str]:
-    for exe in ("pwsh", "powershell"):
-        if which(exe):
-            return exe
-    return None
-
-
-def _read_last_commands_from_ps_history(max_count: int) -> List[str]:
+def _read_last_commands_from_ps_history(max_count: int) -> List[Command]:
     appdata = os.getenv("APPDATA", "")
     paths = [
         Path(appdata) / "Microsoft" / "PowerShell" / "PSReadLine" / "ConsoleHost_history.txt",
@@ -59,84 +55,85 @@ def _read_last_commands_from_ps_history(max_count: int) -> List[str]:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
         return []
-    return [ln.strip() for ln in lines if
+    commands: List[str] = [ln.strip() for ln in lines if
             ln.strip() and not ln.lower().startswith(("outexplain", "python -m outexplain"))][-max_count:]
+    return [Command(text=c, output="") for c in commands]
 
 
-def _rerun_and_capture_in_pwsh(command: str) -> str:
-    exe = _pwsh_available()
-    if not exe:
-        return ""
-    ps_cmd = f'{command} 2>&1 3>&1 4>&1 5>&1 6>&1 | Out-String'
-    try:
-        proc = subprocess.run([exe, "-NoLogo", "-NoProfile", "-Command", ps_cmd],
-                              text=True, capture_output=True, cwd=os.getcwd())
-        return (proc.stdout or "") + (proc.stderr or "")
-    except Exception:
-        return ""
+def _read_commands_from_ps_transcript(max_count: int) -> List[Command]:
+    docs = Path.home() / "Documents"
+    candidates = sorted(docs.glob("PowerShell_transcript*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in candidates:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        slice_text = "\n".join(text.splitlines()[-MAX_HISTORY_LINES:])
+        shell = Shell(path=str(path), name="powershell", prompt=">")
+        commands = get_commands(slice_text, shell, max_commands=max_count)
+        if commands:
+            return commands
+    return []
+
+
+def _clean_history_line(line: str) -> Optional[str]:
+    line = line.strip()
+    if not line:
+        return None
+    if line.lower().startswith(("outexplain", "python -m outexplain")):
+        return None
+    if line.startswith(":") and ";" in line:
+        # zsh style timestamped history
+        line = line.split(";", 1)[1].strip()
+    if line and line[0].isdigit() and " " in line:
+        # history output like " 203  ls"
+        line = line.split(" ", 1)[1].strip()
+    return line or None
+
+
+def _has_missing_output(commands: List[Command]) -> bool:
+    return any(not (cmd.output or "").strip() for cmd in commands)
 
 
 # ---------------------------
 # Bash / Git Bash / Zsh helpers
 # ---------------------------
-def _rerun_and_capture_in_bashlike(shell_path: Optional[str], command: str) -> str:
+def _read_bashlike_history(shell_path: Optional[str], max_count: int) -> List[Command]:
     exe = shell_path or "bash"
+    commands: List[str] = []
+
     try:
-        proc = subprocess.run([exe, "-lc", f"{command} 2>&1"],
+        proc = subprocess.run([exe, "-lc", f"fc -ln -n -{max_count}"],
                               text=True, capture_output=True, cwd=os.getcwd())
-        return (proc.stdout or "") + (proc.stderr or "")
+        if proc.stdout:
+            cleaned = [_clean_history_line(ln) for ln in proc.stdout.splitlines()]
+            commands = [ln for ln in cleaned if ln]
     except Exception:
-        return ""
+        commands = []
 
+    if not commands:
+        try:
+            proc = subprocess.run([exe, "-lc", f"HISTTIMEFORMAT= history | tail -n {max_count}"],
+                                  text=True, capture_output=True, cwd=os.getcwd())
+            if proc.stdout:
+                cleaned = [_clean_history_line(ln) for ln in proc.stdout.splitlines()]
+                commands = [ln for ln in cleaned if ln]
+        except Exception:
+            commands = []
 
-def _get_last_command_from_bashlike(shell_path: Optional[str]) -> Optional[str]:
-    """
-    Try to retrieve the last command from a bash-like shell.
-    1) Try `fc -ln -1` in a login shell (works in many setups).
-    2) Fallback: read ~/.bash_history or ~/.zsh_history directly.
-    """
-    exe = shell_path or "bash"
+    if not commands:
+        histfile = Path(os.getenv("HISTFILE") or (Path.home() / ".bash_history")).expanduser()
+        if histfile.exists():
+            try:
+                commands = [
+                    _clean_history_line(ln) or "" for ln in histfile.read_text(encoding="utf-8", errors="ignore").splitlines()
+                ]
+                commands = [ln for ln in commands if ln]
+            except Exception:
+                commands = []
 
-    # --- Method 1: fc -ln -1 ---
-    try:
-        proc = subprocess.run([exe, "-lc", "fc -ln -1"],
-                              text=True, capture_output=True, cwd=os.getcwd())
-        cmd = proc.stdout.strip()
-        if cmd:
-            return cmd
-    except Exception:
-        pass
-
-    # --- Method 2: read history file ---
-    histfile = Path(os.getenv("HISTFILE") or (Path.home() / ".bash_history")).expanduser()
-    if not histfile.exists():
-        return None
-    try:
-        lines = histfile.read_text(encoding="utf-8", errors="ignore").splitlines()
-        for ln in reversed(lines):
-            ln = ln.strip()
-            if not ln:
-                continue
-            if ln.lower().startswith(("outexplain", "python -m outexplain")):
-                continue
-            return ln
-    except Exception:
-        return None
-
-    return None
-
-
-# ---------------------------
-# Build terminal context
-# ---------------------------
-def _build_context(prev_cmds: List[str], last_cmd: str, output: str, prompt: str) -> str:
-    previous = "\n".join(f"{prompt} {c}" for c in prev_cmds) if prev_cmds else ""
-    context = "<terminal_history>\n"
-    context += "<previous_commands>\n" + previous + "\n</previous_commands>\n"
-    context += "\n<last_command>\n"
-    context += f"{prompt} {last_cmd}\n{(output or '').strip()}"
-    context += "\n</last_command>\n</terminal_history>"
-    return context
+    commands = [cmd for cmd in commands if cmd][:max_count]
+    return [Command(text=cmd, output="") for cmd in commands]
 
 
 # ---------------------------
@@ -144,8 +141,8 @@ def _build_context(prev_cmds: List[str], last_cmd: str, output: str, prompt: str
 # ---------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="Explain your terminal output with optional multi-command context.")
-    parser.add_argument("-x", "--last", type=int, default=None,
-                        help="Number of most recent commands to include as context (e.g. -x 5).")
+    parser.add_argument("-x", "-n", "--last", type=int, default=None,
+                        help="Number of most recent commands to include as context (alias: -n, --last, default env OUTEXPLAIN_MAX_COMMANDS).")
     parser.add_argument("-m", "--message", type=str, default="",
                         help="Extra message to guide the explanation (e.g. -m 'why did npm fail?').")
     parser.add_argument("--query", type=str, default="", help="Alias of --message (will be combined).")
@@ -194,29 +191,33 @@ def main() -> None:
         is_powershell = (shell.name in {"pwsh", "powershell"})
         is_bashlike = (shell.name in {"bash", "zsh"})
 
+        max_requested = args.last if (isinstance(args.last, int) and args.last > 0) else None
+        cap = max_requested or MAX_COMMANDS_DEFAULT
+
         if in_tmux_or_screen:
-            terminal_context = get_terminal_context(shell, max_commands=args.last)
+            terminal_context = get_terminal_context(shell, max_commands=cap)
         elif stdin_data.strip():
             terminal_context = f"<terminal_history>\n{stdin_data.strip()}\n</terminal_history>"
         elif is_windows and is_powershell:
-            cap = args.last or 3
-            hist_cmds = _read_last_commands_from_ps_history(max_count=cap)
-            if not hist_cmds:
+            commands = _read_commands_from_ps_transcript(max_count=cap)
+            if not commands:
+                commands = _read_last_commands_from_ps_history(max_count=cap)
+            if not commands:
                 console.print(f"[bold yellow]{symbols['warn']} Couldn't read PSReadLine history.[/bold yellow]")
                 return
-            prev_cmds, last_cmd = hist_cmds[:-1], hist_cmds[-1]
-            output = _rerun_and_capture_in_pwsh(last_cmd) or "(no output captured)"
-            terminal_context = _build_context(prev_cmds, last_cmd, output, prompt="PS>")
+            commands = truncate_commands(commands, max_commands=cap)
+            if _has_missing_output(commands):
+                console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
+            terminal_context = build_context_from_commands(commands, shell.prompt or "PS>")
         elif is_bashlike:
-            last_cmd = _get_last_command_from_bashlike(shell.path)
-            if not last_cmd:
-                console.print(f"[bold yellow]{symbols['warn']} Could not retrieve last command.[/bold yellow]")
+            commands = _read_bashlike_history(shell.path, max_count=cap)
+            if not commands:
+                console.print(f"[bold yellow]{symbols['warn']} Could not retrieve recent history from bash/zsh.[/bold yellow]")
                 return
-            if last_cmd.lower().startswith(("outexplain", "python -m outexplain")):
-                console.print(f"[bold yellow]{symbols['warn']} Last command was outexplain itself.[/bold yellow]")
-                return
-            output = _rerun_and_capture_in_bashlike(shell.path, last_cmd) or "(no output captured)"
-            terminal_context = _build_context([], last_cmd, output, prompt="$")
+            commands = truncate_commands(commands, max_commands=cap)
+            if _has_missing_output(commands):
+                console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
+            terminal_context = build_context_from_commands(commands, shell.prompt or "$")
         else:
             console.print(f"[bold yellow]{symbols['warn']} No tmux/screen or input detected.[/bold yellow]")
             return
