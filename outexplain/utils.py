@@ -128,11 +128,12 @@ def looks_like_command_line(line: str) -> bool:
     s = strip_ansi(line).rstrip()
     return bool(s) and (s.endswith("$") or s.endswith("#") or s.endswith(">"))
 
-def get_commands(pane_output: str, shell: Shell) -> List[Command]:
+def get_commands(pane_output: str, shell: Shell, max_commands: Optional[int] = None) -> List[Command]:
     commands: List[Command] = []
     buffer: List[str] = []
     prompt_raw = (shell.prompt or "").strip()
     prompt_cmp = strip_ansi(prompt_raw)
+    cap = max_commands if (isinstance(max_commands, int) and max_commands > 0) else None
     for raw in reversed(pane_output.splitlines()):
         line = raw.rstrip("\n")
         if not line.strip():
@@ -151,11 +152,16 @@ def get_commands(pane_output: str, shell: Shell) -> List[Command]:
             command = Command(cmd_text, "\n".join(reversed(buffer)).strip())
             commands.append(command)
             buffer.clear()
+            if cap and len(commands) >= cap:
+                break
             continue
         buffer.append(line)
-    return [c for c in commands if not c.text.startswith("outexplain")]
+    filtered = [c for c in commands if not c.text.startswith("outexplain")]
+    return list(reversed(filtered))
 
-def truncate_commands(commands: List[Command]) -> List[Command]:
+def truncate_commands(commands: List[Command], max_commands: Optional[int] = None) -> List[Command]:
+    cap = max_commands if (isinstance(max_commands, int) and max_commands > 0) else None
+    commands = commands[-cap:] if cap else commands
     num_chars, truncated = 0, []
     for command in commands:
         cchars = count_chars(command.text)
@@ -189,8 +195,11 @@ def truncate_pane_output(output: str) -> str:
 def command_to_string(command: Command, shell_prompt: Optional[str] = None) -> str:
     shell_prompt = shell_prompt if shell_prompt else "$"
     command_str = f"{shell_prompt} {command.text}"
-    if command.output.strip():
-        command_str += f"\n{command.output}"
+    output = command.output.strip()
+    if output:
+        command_str += f"\n{output}"
+    else:
+        command_str += "\n(output missing)"
     return command_str
 
 def format_output(output: str) -> Markdown:
@@ -395,19 +404,23 @@ def get_terminal_context(shell: Shell, max_commands: Optional[int] = None) -> st
         return "<terminal_history>No terminal output found.</terminal_history>"
     if not shell.prompt:
         return f"<terminal_history>\n{truncate_pane_output(pane_output)}\n</terminal_history>"
-    commands = get_commands(pane_output, shell)
     cap = max_commands if (isinstance(max_commands, int) and max_commands > 0) else MAX_COMMANDS_DEFAULT
-    commands = truncate_commands(commands[:cap])
-    commands = list(reversed(commands))
+    commands = get_commands(pane_output, shell, max_commands=cap)
+    commands = truncate_commands(commands, max_commands=cap)
+    if not commands:
+        return "<terminal_history>No terminal output found.</terminal_history>"
+    return build_context_from_commands(commands, shell.prompt)
+
+def build_context_from_commands(commands: List[Command], shell_prompt: Optional[str]) -> str:
     if not commands:
         return "<terminal_history>No terminal output found.</terminal_history>"
     previous_commands, last_command = commands[:-1], commands[-1]
     context = "<terminal_history>\n"
     context += "<previous_commands>\n"
-    context += "\n".join(command_to_string(c, shell.prompt) for c in previous_commands)
+    context += "\n".join(command_to_string(c, shell_prompt) for c in previous_commands)
     context += "\n</previous_commands>\n"
     context += "\n<last_command>\n"
-    context += command_to_string(last_command, shell.prompt)
+    context += command_to_string(last_command, shell_prompt)
     context += "\n</last_command>\n"
     context += "</terminal_history>"
     return context
