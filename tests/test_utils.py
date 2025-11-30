@@ -1,12 +1,8 @@
-import builtins
-from types import SimpleNamespace
-
 import pytest
 
 from outexplain import outexplain
 from outexplain.utils import (
     Command,
-    MAX_CHARS,
     build_query,
     get_commands,
     get_llm_provider,

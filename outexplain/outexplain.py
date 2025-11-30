@@ -183,8 +183,6 @@ def main() -> None:
     term_info = detect_terminal_info(shell)
     symbols = choose_symbols(term_info)
     console = Console(color_system=_color_system_from_depth(term_info.color_depth))
-    debug = (lambda text: console.print(f"[dim]outexplain | {text}[/dim]")) if args.debug else (lambda *_: None)
-
     if args.debug or args.debug_env:
         console.print(f"[dim]{format_terminal_info(term_info)}[/dim]")
 
