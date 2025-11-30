@@ -144,9 +144,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Explain your terminal output with optional multi-command context.")
     parser.add_argument("-x", "--last", type=int, default=None,
                         help="Number of most recent commands to include as context (alias: -x, --last, default env OUTEXPLAIN_MAX_COMMANDS).")
-    parser.add_argument("-m", "--message", type=str, default="",
-                        help="Extra message to guide the explanation (e.g. -m 'why did npm fail?').")
-    parser.add_argument("--query", type=str, default="", help="Alias of --message (will be combined).")
+    parser.add_argument(
+        "-m",
+        "--message",
+        "--query",
+        dest="messages",
+        action="append",
+        default=[],
+        help="Extra guidance or a direct question (alias: --query). Repeatable.",
+    )
+    parser.add_argument(
+        "-s",
+        "--summary",
+        action="store_true",
+        help="Skip troubleshooting and just summarize the last command/output.",
+    )
     parser.add_argument("--provider", choices=["openai", "anthropic", "ollama"], help="Force a provider.")
     parser.add_argument("--model", type=str, help="LLM model to use.")
     parser.add_argument("--debug", action="store_true", help="Print debug information.")
@@ -170,9 +182,10 @@ def main() -> None:
         console.print(f"[dim]{format_terminal_info(term_info)}[/dim]")
 
     # Merge message + query
-    user_message = (args.message or "").strip()
-    if args.query.strip():
-        user_message = (user_message + "\n" + args.query.strip()).strip()
+    user_messages = [msg.strip() for msg in args.messages if msg and msg.strip()]
+    if args.summary:
+        user_messages.append("Summarize the last command/output in 3-5 bullet points.")
+    user_message = "\n".join(user_messages).strip()
 
     status_text = f"{symbols['info']} Trying my best..."
     with console.status(f"[bold green]{status_text}"):
