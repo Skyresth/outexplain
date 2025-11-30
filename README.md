@@ -137,6 +137,16 @@ You can pass `-m/--message/--query` multiple times to add more context. Use `-x/
 - **Sin tmux/screen instalados:** instala uno de ellos o pásale el historial por `stdin`, por ejemplo `history | tail -n 50 | outexplain`.
 - **Claves de API ausentes:** configura alguna de las variables anteriores o define `--provider`/`--model` para usar Ollama.
 
+## Desarrollo y ejecución local
+
+Instala las dependencias de desarrollo y ejecuta las comprobaciones básicas con:
+
+```bash
+pip install -e .[dev]
+ruff check
+pytest
+```
+
 ## Matriz de pruebas
 
 - **Automatizadas (sugeridas):**

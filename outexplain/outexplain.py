@@ -137,6 +137,13 @@ def _read_bashlike_history(shell_path: Optional[str], max_count: int) -> List[Co
     return [Command(text=cmd, output="") for cmd in commands]
 
 
+def combine_user_messages(messages: List[str], summary: bool = False) -> str:
+    user_messages = [msg.strip() for msg in messages if msg and msg.strip()]
+    if summary:
+        user_messages.append("Summarize the last command/output in 3-5 bullet points.")
+    return "\n".join(user_messages).strip()
+
+
 # ---------------------------
 # Main CLI
 # ---------------------------
@@ -176,16 +183,11 @@ def main() -> None:
     term_info = detect_terminal_info(shell)
     symbols = choose_symbols(term_info)
     console = Console(color_system=_color_system_from_depth(term_info.color_depth))
-    debug = (lambda text: console.print(f"[dim]outexplain | {text}[/dim]")) if args.debug else (lambda *_: None)
-
     if args.debug or args.debug_env:
         console.print(f"[dim]{format_terminal_info(term_info)}[/dim]")
 
     # Merge message + query
-    user_messages = [msg.strip() for msg in args.messages if msg and msg.strip()]
-    if args.summary:
-        user_messages.append("Summarize the last command/output in 3-5 bullet points.")
-    user_message = "\n".join(user_messages).strip()
+    user_message = combine_user_messages(args.messages, summary=args.summary)
 
     status_text = f"{symbols['info']} Trying my best..."
     with console.status(f"[bold green]{status_text}"):
