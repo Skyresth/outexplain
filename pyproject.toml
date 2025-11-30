@@ -36,6 +36,12 @@ dependencies = [
 [project.scripts]
 outexplain = "outexplain.outexplain:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/Skyresth/outexplain"
 Source = "https://github.com/Skyresth/outexplain"
