@@ -34,6 +34,11 @@ Command = namedtuple("Command", ["text", "output"])
 
 # Correct ANSI escape pattern (strip control codes)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9]{16,}", re.IGNORECASE),
+    re.compile(r"api[_-]?key\s*[=:]\s*([A-Za-z0-9._-]{16,})", re.IGNORECASE),
+    re.compile(r"bearer\s+([A-Za-z0-9._-]{16,})", re.IGNORECASE),
+]
 
 # ----------- Small helpers -----------
 def count_chars(text: str) -> int:
@@ -44,6 +49,13 @@ def truncate_chars(text: str, reverse: bool = False) -> str:
 
 def strip_ansi(s: str) -> str:
     return ANSI_RE.sub("", s or "")
+
+
+def sanitize_text(text: str) -> str:
+    sanitized = text or ""
+    for pattern in SECRET_PATTERNS:
+        sanitized = pattern.sub("[REDACTED]", sanitized)
+    return sanitized
 
 # --------------- Shell resolution ---------------
 def get_shell_name(shell_path: Optional[str] = None) -> Optional[str]:
@@ -393,7 +405,9 @@ def get_shell() -> Shell:
     prompt = get_shell_prompt(name, path)
     return Shell(path, name, prompt)
 
-def get_terminal_context(shell: Shell, max_commands: Optional[int] = None) -> str:
+def get_terminal_context(
+    shell: Shell, max_commands: Optional[int] = None, return_commands: bool = False
+):
     pane_output = get_pane_output()
     if not pane_output and not sys.stdin.isatty():
         try:
@@ -401,15 +415,18 @@ def get_terminal_context(shell: Shell, max_commands: Optional[int] = None) -> st
         except Exception:
             pane_output = ""
     if not pane_output:
-        return "<terminal_history>No terminal output found.</terminal_history>"
+        return ("<terminal_history>No terminal output found.</terminal_history>", []) if return_commands else "<terminal_history>No terminal output found.</terminal_history>"
     if not shell.prompt:
-        return f"<terminal_history>\n{truncate_pane_output(pane_output)}\n</terminal_history>"
+        context = f"<terminal_history>\n{truncate_pane_output(pane_output)}\n</terminal_history>"
+        return (context, []) if return_commands else context
     cap = max_commands if (isinstance(max_commands, int) and max_commands > 0) else MAX_COMMANDS_DEFAULT
     commands = get_commands(pane_output, shell, max_commands=cap)
     commands = truncate_commands(commands, max_commands=cap)
     if not commands:
-        return "<terminal_history>No terminal output found.</terminal_history>"
-    return build_context_from_commands(commands, shell.prompt)
+        empty = "<terminal_history>No terminal output found.</terminal_history>"
+        return (empty, []) if return_commands else empty
+    context = build_context_from_commands(commands, shell.prompt)
+    return (context, commands) if return_commands else context
 
 def build_context_from_commands(commands: List[Command], shell_prompt: Optional[str]) -> str:
     if not commands:
@@ -428,7 +445,7 @@ def build_context_from_commands(commands: List[Command], shell_prompt: Optional[
 def build_query(context: str, query: Optional[str] = None) -> str:
     if not (query and query.strip()):
         query = "Explain the last command's output. Use previous commands as context, but focus on the last command."
-    return f"{context}\n\n{query}"
+    return f"{sanitize_text(context)}\n\n{sanitize_text(query)}"
 
 def explain(context: str, query: Optional[str] = None, provider: Optional[str] = None, model: Optional[str] = None) -> Markdown:
     system_message = EXPLAIN_PROMPT if not query else ANSWER_PROMPT

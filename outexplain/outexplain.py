@@ -11,6 +11,7 @@ from pathlib import Path
 from rich.console import Console
 
 # Local
+from outexplain.storage import append_history, read_history
 from outexplain.utils import (
     Command,
     MAX_COMMANDS_DEFAULT,
@@ -141,8 +142,8 @@ def _read_bashlike_history(shell_path: Optional[str], max_count: int) -> List[Co
 # ---------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="Explain your terminal output with optional multi-command context.")
-    parser.add_argument("-x", "-n", "--last", type=int, default=None,
-                        help="Number of most recent commands to include as context (alias: -n, --last, default env OUTEXPLAIN_MAX_COMMANDS).")
+    parser.add_argument("-x", "--last", type=int, default=None,
+                        help="Number of most recent commands to include as context (alias: -x, --last, default env OUTEXPLAIN_MAX_COMMANDS).")
     parser.add_argument("-m", "--message", type=str, default="",
                         help="Extra message to guide the explanation (e.g. -m 'why did npm fail?').")
     parser.add_argument("--query", type=str, default="", help="Alias of --message (will be combined).")
@@ -150,6 +151,12 @@ def main() -> None:
     parser.add_argument("--model", type=str, help="LLM model to use.")
     parser.add_argument("--debug", action="store_true", help="Print debug information.")
     parser.add_argument("--debug-env", action="store_true", help="Print detected shell/terminal capabilities.")
+    parser.add_argument("--log-level", choices=["debug", "info", "warning", "error"],
+                        default=os.getenv("OUTEXPLAIN_LOG_LEVEL", "info"),
+                        help="Set the log level for invocation history.")
+    parser.add_argument("--no-log", action="store_true", help="Disable writing invocation history to disk.")
+    parser.add_argument("--review", "-n", type=int, default=None,
+                        help="Review the N most recent command/output pairs from the history log when live capture is unavailable.")
     args = parser.parse_args()
 
     # Detect shell
@@ -194,33 +201,47 @@ def main() -> None:
         max_requested = args.last if (isinstance(args.last, int) and args.last > 0) else None
         cap = max_requested or MAX_COMMANDS_DEFAULT
 
+        commands: List[Command] = []
+        terminal_context = ""
+
         if in_tmux_or_screen:
-            terminal_context = get_terminal_context(shell, max_commands=cap)
+            terminal_context, commands = get_terminal_context(shell, max_commands=cap, return_commands=True)
         elif stdin_data.strip():
             terminal_context = f"<terminal_history>\n{stdin_data.strip()}\n</terminal_history>"
         elif is_windows and is_powershell:
             commands = _read_commands_from_ps_transcript(max_count=cap)
             if not commands:
                 commands = _read_last_commands_from_ps_history(max_count=cap)
-            if not commands:
-                console.print(f"[bold yellow]{symbols['warn']} Couldn't read PSReadLine history.[/bold yellow]")
-                return
-            commands = truncate_commands(commands, max_commands=cap)
-            if _has_missing_output(commands):
-                console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
-            terminal_context = build_context_from_commands(commands, shell.prompt or "PS>")
+            if commands:
+                commands = truncate_commands(commands, max_commands=cap)
+                if _has_missing_output(commands):
+                    console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
+                terminal_context = build_context_from_commands(commands, shell.prompt or "PS>")
         elif is_bashlike:
             commands = _read_bashlike_history(shell.path, max_count=cap)
-            if not commands:
+            if commands:
+                commands = truncate_commands(commands, max_commands=cap)
+                if _has_missing_output(commands):
+                    console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
+                terminal_context = build_context_from_commands(commands, shell.prompt or "$")
+
+        if not terminal_context and args.review:
+            review_commands, review_prompt = read_history(args.review)
+            if review_commands:
+                commands = review_commands
+                terminal_context = build_context_from_commands(commands, review_prompt or shell.prompt or "$")
+                console.print(f"[dim]{symbols['info']} Using stored history log.[/dim]")
+
+        if not terminal_context:
+            if is_windows and is_powershell:
+                console.print(f"[bold yellow]{symbols['warn']} Couldn't read PSReadLine history.[/bold yellow]")
+            elif is_bashlike:
                 console.print(f"[bold yellow]{symbols['warn']} Could not retrieve recent history from bash/zsh.[/bold yellow]")
-                return
-            commands = truncate_commands(commands, max_commands=cap)
-            if _has_missing_output(commands):
-                console.print(f"[bold yellow]{symbols['warn']} Some command outputs are missing; context includes history only.[/bold yellow]")
-            terminal_context = build_context_from_commands(commands, shell.prompt or "$")
-        else:
-            console.print(f"[bold yellow]{symbols['warn']} No tmux/screen or input detected.[/bold yellow]")
+            else:
+                console.print(f"[bold yellow]{symbols['warn']} No tmux/screen or input detected.[/bold yellow]")
             return
+
+        append_history(commands, shell, enabled=not args.no_log, log_level=args.log_level)
 
         response = explain(terminal_context, user_message, provider=args.provider, model=args.model)
 
